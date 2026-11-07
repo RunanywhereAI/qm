@@ -16,18 +16,23 @@ test("disabled analytics makes no requests", async () => {
   assert.equal(requests, 0);
 });
 
-test("publication has matching company identity, groups and deduplication without app content", async () => {
+test("publication posts company, principal and a deduplication id without app content", async () => {
   let body: Record<string, any> = {};
-  const analytics = createProductAnalytics("company", { apiKey: "public-token" }, async (url, init) => {
-    assert.equal(url, "https://us.i.posthog.com/i/v0/e/");
+  const analytics = createProductAnalytics("company", { url: "https://events.example.com/ingest", token: "events-token" }, async (url, init) => {
+    assert.equal(url, "https://events.example.com/ingest");
+    assert.equal((init?.headers as Record<string, string>).authorization, "Bearer events-token");
     assert.equal(init?.redirect, "error");
     body = JSON.parse(String(init?.body));
     return new Response("ok");
   });
   await analytics.appPublished("person", "app", 2);
   assert.equal(body.event, "app_published");
-  assert.equal(body.properties.distinct_id, JSON.stringify(["company", "person"]));
-  assert.deepEqual(body.properties.$groups, { company: "company" });
+  assert.equal(body.company, "company");
+  assert.equal(body.principal, "person");
+  assert.equal(body.insert_id, "app:2:app_published");
+  assert.deepEqual(Object.keys(body).sort(), ["event", "timestamp", "company", "principal", "insert_id", "properties"].sort());
+  assert.deepEqual(body.properties, { surface: "core" });
+});
   assert.equal(body.properties.$insert_id, "app:2:app_published");
   assert.deepEqual(
     Object.keys(body.properties).sort(),
@@ -36,13 +41,13 @@ test("publication has matching company identity, groups and deduplication withou
 });
 
 test("delivery failures cannot fail publication and concurrent requests are bounded", async () => {
-  const failing = createProductAnalytics("company", { apiKey: "token" }, async () => {
+  const failing = createProductAnalytics("company", { url: "https://events.example.com/ingest" }, async () => {
     throw Error("offline");
   });
   await assert.doesNotReject(failing.appPublished("person", "app", 1));
   await assert.doesNotReject(failing.responseFinished(await humanRun()));
   const releases: Array<() => void> = [];
-  const bounded = createProductAnalytics("company", { apiKey: "token" }, async () => {
+  const bounded = createProductAnalytics("company", { url: "https://events.example.com/ingest" }, async () => {
     await new Promise<void>((resolve) => releases.push(resolve));
     return new Response("ok");
   });
@@ -54,7 +59,7 @@ test("delivery failures cannot fail publication and concurrent requests are boun
 
 test("human run outcomes keep identity and deduplication without response content", async () => {
   const bodies: Record<string, any>[] = [];
-  const analytics = createProductAnalytics("company", { apiKey: "token" }, async (_url, init) => {
+  const analytics = createProductAnalytics("company", { url: "https://events.example.com/ingest" }, async (_url, init) => {
     bodies.push(JSON.parse(String(init?.body)));
     return new Response("ok");
   });
@@ -68,14 +73,10 @@ test("human run outcomes keep identity and deduplication without response conten
     bodies.map((body) => body.event),
     ["response_completed", "response_completed", "response_completed", "response_failed", "response_failed"],
   );
-  assert.equal(bodies[3]!.properties.$insert_id, bodies[4]!.properties.$insert_id);
-  assert.equal(bodies[0]!.properties.$insert_id, `company:${run.id}:response_completed`);
+  assert.equal(bodies[3]!.insert_id, bodies[4]!.insert_id);
+  assert.equal(bodies[0]!.insert_id, `company:${run.id}:response_completed`);
+  assert.equal(bodies[0]!.principal, "person");
   assert.deepEqual(bodies[0]!.properties, {
-    distinct_id: JSON.stringify(["company", "person"]),
-    company_id: "company",
-    $groups: { company: "company" },
-    $insert_id: `company:${run.id}:response_completed`,
-    $geoip_disable: true,
     surface: "web",
     completion_boundary: "run",
     result_status: "ok",
@@ -85,7 +86,7 @@ test("human run outcomes keep identity and deduplication without response conten
 
 test("non-human, stopped and non-completion results do not produce response outcomes", async () => {
   let requests = 0;
-  const analytics = createProductAnalytics("company", { apiKey: "token" }, async () => {
+  const analytics = createProductAnalytics("company", { url: "https://events.example.com/ingest" }, async () => {
     requests++;
     return new Response("ok");
   });
@@ -116,7 +117,7 @@ test("non-human, stopped and non-completion results do not produce response outc
 
 test("terminal listener reports only exhausted failures and accepted completions, not retries or stale leases", async () => {
   const events: string[] = [];
-  const analytics = createProductAnalytics("company", { apiKey: "token" }, async (_url, init) => {
+  const analytics = createProductAnalytics("company", { url: "https://events.example.com/ingest" }, async (_url, init) => {
     events.push(JSON.parse(String(init?.body)).event);
     return new Response("ok");
   });
